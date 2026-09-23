@@ -15,11 +15,12 @@ jobs:
   build:
     name: Build & Test APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
 
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx3g -Dorg.gradle.configuration-cache=false"
 
     steps:
       - name: Checkout repository
@@ -31,25 +32,6 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
           cache: 'gradle'
-
-      - name: Restore Keystore & Configuration
-        run: |
-          # Ensure .env exists so secrets gradle plugin operates cleanly
-          if [ ! -f .env ]; then
-            if [ -f .env.example ]; then
-              cp .env.example .env
-              echo "Copied .env.example to .env"
-            else
-              touch .env
-              echo "Created empty .env"
-            fi
-          fi
-
-          # Restore debug.keystore from base64 if not present in workspace
-          if [ -f debug.keystore.base64 ] && [ ! -f debug.keystore ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
-            echo "Restored debug.keystore from debug.keystore.base64"
-          fi
 
       - name: Accept Android SDK Licenses
         run: |
@@ -65,9 +47,30 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # Build Debug APK FIRST so the APK is guaranteed to be generated and saved
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: |
+          echo "=== 1. Restoring debug.keystore ==="
+          if [ -f debug.keystore.base64 ] && [ ! -s debug.keystore ]; then
+            base64 -d debug.keystore.base64 > debug.keystore 2>/dev/null || base64 --decode debug.keystore.base64 > debug.keystore 2>/dev/null || true
+          fi
+
+          if [ ! -s debug.keystore ]; then
+            echo "Generating fallback debug.keystore with keytool..."
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          ls -l debug.keystore
+
+          echo "=== 2. Setting up environment variables (.env) ==="
+          if [ ! -f .env ]; then
+            if [ -f .env.example ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
+
+          echo "=== 3. Compiling Debug APK ==="
+          ./gradlew assembleDebug --no-daemon --no-configuration-cache --stacktrace
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
@@ -77,20 +80,18 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 14
 
-      # Run Unit Tests (non-blocking for APK delivery)
       - name: Run Unit & Robolectric Tests
-        run: ./gradlew testDebugUnitTest --continue
+        run: ./gradlew testDebugUnitTest --no-daemon --no-configuration-cache --continue
         continue-on-error: true
 
-      # Build Release Bundle / APK (if keystore available in secrets)
       - name: Build Release Bundle / APK (if keystore available)
         run: |
           if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "${{ runner.temp }}/upload.jks"
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "${{ runner.temp }}/upload.jks" 2>/dev/null || echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > "${{ runner.temp }}/upload.jks"
             export KEYSTORE_PATH="${{ runner.temp }}/upload.jks"
             export STORE_PASSWORD="${{ secrets.STORE_PASSWORD }}"
             export KEY_PASSWORD="${{ secrets.KEY_PASSWORD }}"
-            ./gradlew assembleRelease
+            ./gradlew assembleRelease --no-daemon --no-configuration-cache
           else
             echo "No custom release keystore secret configured. Skipping signed release build."
           fi
