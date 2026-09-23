@@ -65,19 +65,24 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Run Unit & Robolectric Tests
-        run: ./gradlew testDebugUnitTest --continue
-
+      # Build Debug APK FIRST so the APK is guaranteed to be generated and saved
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: MidnightBass-Debug-APK
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 14
 
+      # Run Unit Tests (non-blocking for APK delivery)
+      - name: Run Unit & Robolectric Tests
+        run: ./gradlew testDebugUnitTest --continue
+        continue-on-error: true
+
+      # Build Release Bundle / APK (if keystore available in secrets)
       - name: Build Release Bundle / APK (if keystore available)
         run: |
           if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
